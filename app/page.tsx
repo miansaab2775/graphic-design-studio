@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   AlertCircle,
   Brain,
@@ -39,7 +39,6 @@ type Screen =
   | 'menu'
   | 'levelSelect'
   | 'daily'
-  | 'training'
   | 'leaderboard'
   | 'achievements'
   | 'settings'
@@ -93,7 +92,6 @@ type SessionState = {
   currentIndex: number;
   score: number;
   xp: number;
-  coins: number;
   lives: number;
   streak: number;
   correct: number;
@@ -146,6 +144,7 @@ const categoryColors: Record<string, string> = {
 };
 
 function readJSON<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback;
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return fallback;
@@ -156,20 +155,12 @@ function readJSON<T>(key: string, fallback: T): T {
 }
 
 function saveJSON(key: string, value: unknown) {
+  if (typeof window === 'undefined') return;
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    // ignore storage write errors
+    // ignore storage errors
   }
-}
-
-function shuffle<T>(items: T[]): T[] {
-  const copy = [...items];
-  for (let i = copy.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy;
 }
 
 function getDailyQuestion(date: Date) {
@@ -185,7 +176,12 @@ function getLevelQuestions(level: number, difficulty: Difficulty) {
 }
 
 function getTrainingQuestions() {
-  return shuffle(brainQuestions).slice(0, 8);
+  const copy = [...brainQuestions];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, 8);
 }
 
 function getRank(xp: number) {
@@ -199,10 +195,10 @@ function getRank(xp: number) {
 
 function getAchievementBadges(profile: Profile) {
   const badges = [
-    { key: 'first-win', label: 'First Win', unlocked: profile.bestScore >= 250 },
-    { key: 'swift', label: 'Swift Solver', unlocked: profile.xp >= 900 },
-    { key: 'unlock', label: 'Level Unlock', unlocked: profile.unlockedLevel >= 4 },
-    { key: 'legend', label: 'Legend', unlocked: profile.xp >= 2500 },
+    { label: 'First Win', unlocked: profile.bestScore >= 250 },
+    { label: 'Swift Solver', unlocked: profile.xp >= 900 },
+    { label: 'Level Unlock', unlocked: profile.unlockedLevel >= 4 },
+    { label: 'Legend', unlocked: profile.xp >= 2500 },
   ];
   return badges.filter((badge) => badge.unlocked).map((badge) => badge.label);
 }
@@ -236,8 +232,7 @@ export default function HomePage() {
   }, [leaderboard]);
 
   useEffect(() => {
-    const root = document.documentElement;
-    root.classList.toggle('dark', settings.theme === 'dark');
+    document.documentElement.classList.toggle('dark', settings.theme === 'dark');
   }, [settings.theme]);
 
   const currentQuestion = session?.questions[session.currentIndex] ?? null;
@@ -266,9 +261,7 @@ export default function HomePage() {
 
   const playTone = (kind: 'correct' | 'wrong' | 'button') => {
     if (!settings.soundOn) return;
-
-    const AudioCtor =
-      window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    const AudioCtor = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AudioCtor) return;
 
     const ctx = new AudioCtor();
@@ -289,6 +282,52 @@ export default function HomePage() {
     oscillator.start();
     oscillator.stop(ctx.currentTime + 0.12);
     setTimeout(() => ctx.close(), 180);
+  };
+
+  const finishGame = (finalSession: SessionState) => {
+    const totalAnswered = finalSession.correct + finalSession.incorrect + finalSession.skipped;
+    const accuracy = totalAnswered > 0 ? Math.round((finalSession.correct / totalAnswered) * 100) : 0;
+    const coinsEarned = Math.max(30, Math.round(finalSession.score / 25));
+    const earnedXP = finalSession.xp;
+    const unlockedLevel = Math.max(profile.unlockedLevel, finalSession.level + 1);
+    const achievements = getAchievementBadges({
+      ...profile,
+      xp: profile.xp + earnedXP,
+      bestScore: Math.max(profile.bestScore, finalSession.score),
+      unlockedLevel,
+    });
+
+    const nextProfile: Profile = {
+      xp: profile.xp + earnedXP,
+      coins: profile.coins + coinsEarned,
+      bestScore: Math.max(profile.bestScore, finalSession.score),
+      unlockedLevel,
+      streak: Math.max(profile.streak, finalSession.streak),
+      achievements: Array.from(new Set([...profile.achievements, ...achievements])),
+    };
+    setProfile(nextProfile);
+
+    setLeaderboard((current) =>
+      [...current, { name: 'You', score: finalSession.score, xp: nextProfile.xp, date: new Date().toISOString() }]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 8)
+    );
+
+    setResultData({
+      score: finalSession.score,
+      xp: earnedXP,
+      coinsEarned,
+      correct: finalSession.correct,
+      incorrect: finalSession.incorrect,
+      skipped: finalSession.skipped,
+      accuracy,
+      timeTaken: Math.max(1, Math.round((Date.now() - finalSession.startedAt) / 1000)),
+      achievementsUnlocked: achievements,
+      bestScore: Math.max(profile.bestScore, finalSession.score),
+      level: finalSession.level,
+      mode: finalSession.mode,
+    });
+    setScreen('results');
   };
 
   const advanceAfterAnswer = (updatedSession: SessionState) => {
@@ -314,52 +353,6 @@ export default function HomePage() {
     }, 1000);
   };
 
-  const finishGame = (finalSession: SessionState) => {
-    const totalAnswered = finalSession.correct + finalSession.incorrect + finalSession.skipped;
-    const accuracy = totalAnswered > 0 ? Math.round((finalSession.correct / totalAnswered) * 100) : 0;
-    const coinsEarned = Math.max(30, Math.round(finalSession.score / 25));
-    const newXP = profile.xp + finalSession.xp;
-    const unlockedLevel = Math.max(profile.unlockedLevel, finalSession.level + 1);
-    const achievementList = getAchievementBadges({
-      ...profile,
-      xp: newXP,
-      bestScore: Math.max(profile.bestScore, finalSession.score),
-      unlockedLevel,
-    });
-
-    const nextProfile: Profile = {
-      xp: newXP,
-      coins: profile.coins + coinsEarned,
-      bestScore: Math.max(profile.bestScore, finalSession.score),
-      unlockedLevel,
-      streak: Math.max(profile.streak, finalSession.streak),
-      achievements: Array.from(new Set([...profile.achievements, ...achievementList])),
-    };
-    setProfile(nextProfile);
-
-    setLeaderboard((current) =>
-      [...current, { name: 'You', score: finalSession.score, xp: newXP, date: new Date().toISOString() }]
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 8)
-    );
-
-    setResultData({
-      score: finalSession.score,
-      xp: finalSession.xp,
-      coinsEarned,
-      correct: finalSession.correct,
-      incorrect: finalSession.incorrect,
-      skipped: finalSession.skipped,
-      accuracy,
-      timeTaken: Math.max(1, Math.round((Date.now() - finalSession.startedAt) / 1000)),
-      achievementsUnlocked: achievementList,
-      bestScore: Math.max(profile.bestScore, finalSession.score),
-      level: finalSession.level,
-      mode: finalSession.mode,
-    });
-    setScreen('results');
-  };
-
   const startGame = (mode: GameMode, level = 1, difficulty = selectedDifficulty) => {
     let questions: BrainQuestion[] = [];
 
@@ -371,7 +364,7 @@ export default function HomePage() {
       questions = getLevelQuestions(level, difficulty);
     }
 
-    const sessionState: SessionState = {
+    const nextSession: SessionState = {
       mode,
       difficulty,
       level,
@@ -379,7 +372,6 @@ export default function HomePage() {
       currentIndex: 0,
       score: 0,
       xp: 0,
-      coins: 0,
       lives: 3,
       streak: 0,
       correct: 0,
@@ -392,23 +384,20 @@ export default function HomePage() {
       startedAt: Date.now(),
     };
 
-    setSession(sessionState);
+    setSession(nextSession);
     setScreen('play');
   };
 
   const handleAnswer = (answer: string) => {
-    if (!session || session.answered) return;
-    if (!currentQuestion) return;
+    if (!session || session.answered || !currentQuestion) return;
 
     const isCorrect = answer === currentQuestion.correctAnswer;
     const pointsEarned = isCorrect ? currentQuestion.points + session.streak * 20 + session.timeLeft * 3 : 0;
     const xpEarned = isCorrect ? Math.round(currentQuestion.points / 10) : 0;
-    const coinsEarned = isCorrect ? 25 : 0;
     const updatedSession: SessionState = {
       ...session,
       score: isCorrect ? session.score + pointsEarned : session.score,
       xp: isCorrect ? session.xp + xpEarned : session.xp,
-      coins: isCorrect ? session.coins + coinsEarned : session.coins,
       streak: isCorrect ? session.streak + 1 : 0,
       correct: isCorrect ? session.correct + 1 : session.correct,
       incorrect: isCorrect ? session.incorrect : session.incorrect + 1,
@@ -972,7 +961,7 @@ export default function HomePage() {
   );
 }
 
-function PanelShell({ title, subtitle, onBack, children }: { title: string; subtitle: string; onBack: () => void; children: React.ReactNode }) {
+function PanelShell({ title, subtitle, onBack, children }: { title: string; subtitle: string; onBack: () => void; children: ReactNode }) {
   return (
     <div className="mx-auto max-w-5xl rounded-[30px] border border-white/20 bg-white/75 p-5 shadow-[0_28px_90px_rgba(15,23,42,0.12)] backdrop-blur-xl dark:border-slate-700/70 dark:bg-slate-900/70">
       <div className="mb-6 flex items-center justify-between gap-4">
@@ -990,7 +979,7 @@ function PanelShell({ title, subtitle, onBack, children }: { title: string; subt
   );
 }
 
-function MenuButton({ label, icon, onClick }: { label: string; icon: React.ReactNode; onClick: () => void }) {
+function MenuButton({ label, icon, onClick }: { label: string; icon: ReactNode; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
@@ -1004,7 +993,7 @@ function MenuButton({ label, icon, onClick }: { label: string; icon: React.React
   );
 }
 
-function StatCard({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
+function StatCard({ label, value, icon }: { label: string; value: string; icon: ReactNode }) {
   return (
     <div className="rounded-[22px] border border-slate-200 bg-white/80 p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800/70">
       <div className="mb-3 flex items-center justify-between text-slate-500 dark:text-slate-300">
@@ -1016,7 +1005,7 @@ function StatCard({ label, value, icon }: { label: string; value: string; icon: 
   );
 }
 
-function Badge({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
+function Badge({ label, value, icon }: { label: string; value: string; icon: ReactNode }) {
   return (
     <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100">
       {icon}
@@ -1042,7 +1031,7 @@ function MiniStat({ label, value, accent }: { label: string; value: string; acce
   );
 }
 
-function SettingRow({ label, value, icon, onToggle }: { label: string; value: string; icon: React.ReactNode; onToggle: () => void }) {
+function SettingRow({ label, value, icon, onToggle }: { label: string; value: string; icon: ReactNode; onToggle: () => void }) {
   return (
     <div className="flex items-center justify-between rounded-[20px] border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-900">
       <div className="flex items-center gap-3">
@@ -1064,8 +1053,3 @@ function SettingRow({ label, value, icon, onToggle }: { label: string; value: st
 function HeartIcon() {
   return <span className="text-base text-rose-500">❤</span>;
 }
-
-export const metadata = {
-  title: 'Brain Test Challenge',
-  description: 'A playful local brain-training game with puzzles, logic, and timed challenges.',
-};
